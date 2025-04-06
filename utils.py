@@ -2,6 +2,7 @@
 import requests
 import cloudscraper
 import os
+import re # Added for whitespace splitting
 from bs4 import BeautifulSoup
 from google import genai
 from google.genai import types
@@ -77,44 +78,69 @@ def generate_yt(youtube_url):
 
 
 async def send_long_message(channel, text):
-    """Sends a message, splitting it into chunks if it exceeds Discord's character limit."""
+    """
+    Sends a message, splitting it into chunks at word boundaries if it exceeds Discord's character limit.
+    Adds header/footer markers to each chunk if splitting occurs.
+    """
     max_len = 2000
+    # If the message doesn't need splitting, send it directly.
     if len(text) <= max_len:
         await channel.send(text)
         return
 
-    current_chunk = ""
-    lines = text.split('\n')
-    for i, line in enumerate(lines):
-        # Check if adding the next line (plus a newline character) exceeds the limit
-        if len(current_chunk) + len(line) + 1 > max_len:
-            # If the current chunk is not empty, send it
-            if current_chunk:
-                await channel.send(current_chunk)
-                current_chunk = ""
+    # --- Splitting logic with markers ---
+    # Define simple markers
+    header_marker = "---\n"
+    footer_marker = "\n---"
+    # Calculate overhead for the markers
+    marker_overhead = len(header_marker) + len(footer_marker)
+    effective_max_len = max_len - marker_overhead
 
-            # If the line itself is too long, split it by words
-            if len(line) > max_len:
-                words = line.split(' ')
-                temp_line = ""
-                for word in words:
-                    # Check if adding the next word (plus a space) exceeds the limit
-                    if len(temp_line) + len(word) + 1 > max_len:
-                        await channel.send(temp_line)
-                        temp_line = word
-                    else:
-                        # Add the word (with a space if needed)
-                        temp_line += (" " + word if temp_line else word)
-                # Send the remainder of the long line
-                if temp_line:
-                    current_chunk = temp_line + "\n" # Start next chunk with remainder
-            else:
-                 # Start a new chunk with the current line
-                 current_chunk = line + "\n"
+    # Split by any whitespace but keep the delimiters
+    words_and_spaces = [item for item in re.split(r'(\s+)', text) if item]
+
+    chunks = []
+    current_chunk_content = ""
+    for item in words_and_spaces:
+        # Handle overly long individual items (e.g., a single word longer than effective_max_len)
+        if len(item) > effective_max_len:
+            # Send previous chunk if any
+            if current_chunk_content:
+                chunks.append(current_chunk_content)
+                current_chunk_content = ""
+            # Add the long item as its own chunk (it will get markers later)
+            chunks.append(item)
+            continue
+
+        # Check if adding the next item exceeds the effective limit
+        if len(current_chunk_content) + len(item) > effective_max_len:
+            # Finalize the current chunk
+            chunks.append(current_chunk_content)
+            # Start the new chunk, stripping leading whitespace from the item
+            current_chunk_content = item.lstrip()
         else:
-            # Add the line to the current chunk
-            current_chunk += line + "\n"
+            # Add the item to the current chunk
+            current_chunk_content += item
 
-        # Send the chunk immediately if it's the last line and there's content
-        if i == len(lines) - 1 and current_chunk:
-             await channel.send(current_chunk.strip())
+    # Add the last remaining chunk
+    if current_chunk_content:
+        chunks.append(current_chunk_content)
+
+    # Filter out any potentially empty chunks if logic resulted in them
+    chunks = [chunk for chunk in chunks if chunk.strip()]
+
+    # Send the chunks with simple markers
+    for chunk_content in chunks:
+        message_to_send = header_marker + chunk_content.strip() + footer_marker
+
+        # Final check (should be rare with overhead calculation)
+        if len(message_to_send) > max_len:
+             # If it still exceeds, send without footer to maximize content space
+             print(f"Warning: Chunk slightly exceeded max length ({len(message_to_send)}/{max_len}) after adding markers. Sending without footer.")
+             message_to_send = header_marker + chunk_content.strip()
+             if len(message_to_send) > max_len: # If still too long, send raw chunk
+                 print(f"Warning: Chunk still too long ({len(message_to_send)}/{max_len}). Sending raw chunk content.")
+                 message_to_send = chunk_content.strip()
+
+
+        await channel.send(message_to_send)

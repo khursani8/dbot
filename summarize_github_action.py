@@ -4,6 +4,9 @@ import os
 import json
 import re
 from utils import scrape_web_page, generate, generate_yt # Assuming send_long_message is no longer needed directly
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # --- Configuration from Environment Variables ---
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -29,10 +32,34 @@ try:
 except ValueError:
      raise ValueError("Invalid format for SUMMARY_CHANNEL_ID: Must be an integer.")
 
+# Target Channel ID (for summaries from SOURCE_CHANNEL_IDS) - NEW
+target_channel_id_str = os.getenv('TARGET_CHANNEL_ID')
+if not target_channel_id_str:
+    raise ValueError("TARGET_CHANNEL_ID environment variable not set")
+try:
+    TARGET_CHANNEL_ID = int(target_channel_id_str)
+except ValueError:
+     raise ValueError("Invalid format for TARGET_CHANNEL_ID: Must be an integer.")
+
+# Category Name to Monitor - NEW
+BOT_CATEGORY_NAME = os.getenv('BOT_CATEGORY_NAME')
+if not BOT_CATEGORY_NAME:
+    raise ValueError("BOT_CATEGORY_NAME environment variable not set")
+
+# Guild ID (to find category channels) - NEW
+guild_id_str = os.getenv('GUILD_ID')
+if not guild_id_str:
+    raise ValueError("GUILD_ID environment variable not set")
+try:
+    GUILD_ID = int(guild_id_str)
+except ValueError:
+     raise ValueError("Invalid format for GUILD_ID: Must be an integer.")
+
+
 # --- Constants ---
 DISCORD_API_URL = "https://discord.com/api/v10" # Using API v10
-MESSAGE_FETCH_LIMIT = 10 # How many recent messages to check per channel
-SUMMARY_CHECK_LIMIT = 50 # How many recent messages to check in summary channel
+MESSAGE_FETCH_LIMIT = 100 # How many recent messages to check per channel
+SUMMARY_CHECK_LIMIT = 100 # How many recent messages to check in summary channel
 HEADERS = {
     "Authorization": f"Bot {TOKEN}",
     "User-Agent": "DiscordBot (GitHub Action Summarizer, v0.1)", # Good practice
@@ -120,10 +147,29 @@ def get_channel_messages(channel_id, limit):
              print(f"Unexpected error fetching messages: {e}")
              return None
 
-def check_if_summarized(url_to_check, summary_channel_id):
-    """Checks if a URL has already been summarized in the summary channel via HTTP GET."""
-    print(f"Checking if URL already summarized in channel {summary_channel_id}: {url_to_check}")
-    messages = get_channel_messages(summary_channel_id, SUMMARY_CHECK_LIMIT)
+def get_guild_channels(guild_id):
+    """Fetches all channels for a given guild ID via HTTP GET."""
+    url = f"{DISCORD_API_URL}/guilds/{guild_id}/channels"
+    print(f"Fetching channels for guild {guild_id}...")
+    while True:
+        try:
+            response = requests.get(url, headers=HEADERS)
+            if handle_rate_limit(response):
+                continue # Retry after sleep
+            response.raise_for_status()
+            print(f"Successfully fetched channels for guild {guild_id}.")
+            return response.json() # Returns list of channel objects
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching channels for guild {guild_id}: {e}")
+            return None # Indicate failure
+        except Exception as e:
+             print(f"Unexpected error fetching guild channels: {e}")
+             return None
+
+def check_if_summarized(url_to_check, check_channel_id):
+    """Checks if a URL has already been summarized in the specified channel via HTTP GET."""
+    print(f"Checking if URL already summarized in channel {check_channel_id}: {url_to_check}")
+    messages = get_channel_messages(check_channel_id, SUMMARY_CHECK_LIMIT)
     if messages is None:
         print("Could not fetch summary channel messages to check for duplicates.")
         return False # Assume not summarized if check fails
@@ -211,77 +257,141 @@ def process_url(url, source_channel_name, target_channel_id):
 
 # --- Main Execution ---
 
-def main():
-    print("Starting summarizer script (HTTP Mode)...")
+def process_channel(channel_id, channel_name, destination_channel_id, check_duplicate_channel_id):
+    """Processes messages for a single channel and sends summaries."""
+    print(f"\nProcessing channel '{channel_name}' ({channel_id}) -> Destination: {destination_channel_id}")
+    messages = get_channel_messages(channel_id, MESSAGE_FETCH_LIMIT)
+    processed_in_channel = 0
 
-    processed_count = 0
-    for channel_id in SOURCE_CHANNEL_IDS:
-        print(f"\nProcessing channel ID: {channel_id}")
-        messages = get_channel_messages(channel_id, MESSAGE_FETCH_LIMIT)
+    if messages is None:
+        print(f"Skipping channel {channel_id} due to fetch error.")
+        return 0
 
-        if messages is None:
-            print(f"Skipping channel {channel_id} due to fetch error.")
+    print(f"Fetched {len(messages)} messages from channel '{channel_name}' ({channel_id})")
+
+    # Process messages oldest to newest for slightly better summary ordering if multiple found
+    for message in reversed(messages):
+        message_id = message.get("id")
+        author_name = message.get("author", {}).get("username", "Unknown")
+        content = message.get("content", "")
+        embeds = message.get("embeds", [])
+
+        print(f"  Checking message: {message_id} by {author_name}")
+
+        # Basic check to skip bot messages (can be improved if needed)
+        # if message.get("author", {}).get("bot", False):
+        #      print("    Skipping message from bot.")
+        #      continue
+
+        # Extract URLs
+        url_regex = r"(https?://[^\s]+)"
+        urls = re.findall(url_regex, content)
+        if not urls and embeds:
+            for embed in embeds:
+                if embed.get("url"):
+                    # Handle potential relative URLs in embeds if necessary, though less common
+                    urls.append(embed["url"])
+
+        if not urls:
+            print("    No URLs found in message.")
             continue
 
-        # Get channel name for context (requires extra API call or hardcoding mapping)
-        # For simplicity, we'll just use the ID for now in the summary prefix.
-        # Alternatively, fetch channel details once:
-        channel_name = f"Channel {channel_id}" # Placeholder
-        try:
+        # Process the first found URL
+        url_to_process = urls[0]
+        print(f"    Found URL: {url_to_process}")
+
+        # Check if already summarized IN THE CORRECT DESTINATION CHANNEL
+        if check_if_summarized(url_to_process, check_duplicate_channel_id):
+            print(f"    URL {url_to_process} already summarized in channel {check_duplicate_channel_id}. Skipping.")
+            continue # Move to the next message
+
+        # Process and send summary to the designated destination_channel_id
+        if process_url(url_to_process, channel_name, destination_channel_id):
+            processed_in_channel += 1
+            # Optional: Add a small delay after successful processing
+            time.sleep(1) # Be mindful of total execution time in GitHub Actions
+
+    print(f"Finished processing channel '{channel_name}'. Summarized {processed_in_channel} new URLs.")
+    return processed_in_channel
+
+
+def main():
+    print("Starting summarizer script (HTTP Mode)...")
+    total_processed_count = 0
+
+    # --- Identify Category Channels ---
+    print(f"\nIdentifying channels in category '{BOT_CATEGORY_NAME}' for guild {GUILD_ID}...")
+    all_channels = get_guild_channels(GUILD_ID)
+    category_channels_to_process = []
+    category_id = None
+
+    if all_channels:
+        # Find the category ID
+        for channel in all_channels:
+            # Channel types: 0=Text, 2=Voice, 4=Category, 5=News, 10/11/12=Thread, 13=Stage
+            if channel.get("type") == 4 and channel.get("name") == BOT_CATEGORY_NAME:
+                category_id = channel.get("id")
+                print(f"Found category '{BOT_CATEGORY_NAME}' with ID: {category_id}")
+                break
+
+        if category_id:
+            # Find text channels within that category
+            for channel in all_channels:
+                 # Check type is Text (0) and parent_id matches category_id
+                 if channel.get("type") == 0 and channel.get("parent_id") == category_id:
+                     # Exclude source/target/summary channels explicitly if they happen to be in the category
+                     if int(channel.get("id")) not in SOURCE_CHANNEL_IDS + [TARGET_CHANNEL_ID, SUMMARY_CHANNEL_ID]:
+                         category_channels_to_process.append(
+                             {"id": int(channel.get("id")), "name": channel.get("name", f"Channel {channel.get('id')}")}
+                         )
+                         print(f"  + Found text channel '{channel.get('name')}' ({channel.get('id')}) in category.")
+                     else:
+                         print(f"  - Skipping channel '{channel.get('name')}' ({channel.get('id')}) as it's a source/target/summary channel.")
+            print(f"Identified {len(category_channels_to_process)} channels to process in category '{BOT_CATEGORY_NAME}'.")
+        else:
+            print(f"Warning: Category '{BOT_CATEGORY_NAME}' not found in guild {GUILD_ID}.")
+    else:
+        print("Warning: Could not fetch guild channels. Skipping category processing.")
+
+
+    # --- Process Source Channels ---
+    print("\n--- Processing Source Channels ---")
+    # Create a map for faster name lookup if needed, or fetch individually
+    source_channel_names = {}
+    for channel_id in SOURCE_CHANNEL_IDS:
+         # Fetch name individually - less efficient but simpler for now
+         channel_name = f"Source Channel {channel_id}"
+         try:
              channel_info_resp = requests.get(f"{DISCORD_API_URL}/channels/{channel_id}", headers=HEADERS)
              if channel_info_resp.status_code == 200:
                  channel_name = channel_info_resp.json().get("name", channel_name)
              else:
-                 print(f"Warning: Could not fetch name for channel {channel_id}")
-        except Exception as e:
-             print(f"Warning: Error fetching name for channel {channel_id}: {e}")
+                 print(f"Warning: Could not fetch name for source channel {channel_id}")
+         except Exception as e:
+             print(f"Warning: Error fetching name for source channel {channel_id}: {e}")
+         source_channel_names[channel_id] = channel_name
+
+         # Process this source channel, sending summaries to TARGET_CHANNEL_ID
+         # Check for duplicates in TARGET_CHANNEL_ID
+         count = process_channel(channel_id, channel_name, TARGET_CHANNEL_ID, TARGET_CHANNEL_ID)
+         total_processed_count += count
 
 
-        print(f"Fetched {len(messages)} messages from channel '{channel_name}' ({channel_id})")
+    # --- Process Category Channels ---
+    print("\n--- Processing Category Channels ---")
+    if not category_channels_to_process:
+        print("No category channels identified or found to process.")
+    else:
+        for channel_info in category_channels_to_process:
+            channel_id = channel_info["id"]
+            channel_name = channel_info["name"]
+            # Process this category channel, sending summaries to SUMMARY_CHANNEL_ID
+            # Check for duplicates in SUMMARY_CHANNEL_ID
+            count = process_channel(channel_id, channel_name, SUMMARY_CHANNEL_ID, SUMMARY_CHANNEL_ID)
+            total_processed_count += count
 
-        # Process messages oldest to newest for slightly better summary ordering if multiple found
-        for message in reversed(messages):
-            message_id = message.get("id")
-            author_id = message.get("author", {}).get("id")
-            author_name = message.get("author", {}).get("username", "Unknown")
-            content = message.get("content", "")
-            embeds = message.get("embeds", [])
 
-            print(f"  Checking message: {message_id} by {author_name}")
-
-            # Basic check to skip bot messages (can be improved if needed)
-            if message.get("author", {}).get("bot", False):
-                 print("    Skipping message from bot.")
-                 continue
-
-            # Extract URLs
-            url_regex = r"(https?://[^\s]+)"
-            urls = re.findall(url_regex, content)
-            if not urls and embeds:
-                for embed in embeds:
-                    if embed.get("url"):
-                        urls.append(embed["url"])
-
-            if not urls:
-                print("    No URLs found in message.")
-                continue
-
-            # Process the first found URL
-            url_to_process = urls[0]
-            print(f"    Found URL: {url_to_process}")
-
-            # Check if already summarized
-            if check_if_summarized(url_to_process, SUMMARY_CHANNEL_ID):
-                print(f"    URL {url_to_process} already summarized. Skipping.")
-                continue # Move to the next message
-
-            # Process and send summary to the designated SUMMARY_CHANNEL_ID
-            if process_url(url_to_process, channel_name, SUMMARY_CHANNEL_ID):
-                processed_count += 1
-                # Optional: Add a small delay after successful processing
-                time.sleep(1)
-
-    print(f"\nScript finished. Processed and summarized {processed_count} new URLs.")
+    print(f"\nScript finished. Processed and summarized a total of {total_processed_count} new URLs across all channels.")
 
 
 if __name__ == "__main__":
