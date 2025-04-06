@@ -6,4 +6,4 @@ requests
 # selenium # Assuming not needed by utils? Keep if generate_yt/scrape needs it. Let's remove for now.
 cloudscraper
 google-genai
-# python-dotenv # Removed
+python-dotenv # Removed
