@@ -66,7 +66,7 @@ FORUM_SEARCH_THREAD_LIMIT = 25 # How many active/archived threads to search for 
 
 HEADERS = {
     "Authorization": f"Bot {TOKEN}",
-    "User-Agent": "DiscordBot (Forum Summarizer, v0.1)",
+    "User-Agent": "DiscordBot (Forum Summarizer, v0.4)", # Incremented version
     "Content-Type": "application/json",
 }
 RATE_LIMIT_SLEEP = 1  # Simple sleep duration in seconds for rate limits
@@ -126,7 +126,7 @@ def get_guild_channels(guild_id):
 def get_active_guild_threads(guild_id):
     """Fetches all active threads for a given guild ID via HTTP GET."""
     url = f"{DISCORD_API_URL}/guilds/{guild_id}/threads/active"
-    # print(f"Fetching active threads for guild {guild_id}...")
+    # print(f"Fetching active threads for guild {guild_id}...") # Reduce noise
     while True:
         try:
             response = requests.get(url, headers=HEADERS)
@@ -136,7 +136,6 @@ def get_active_guild_threads(guild_id):
             data = response.json()
             threads = data.get('threads', [])
             # print(f"Successfully fetched {len(threads)} active threads for guild.")
-            # Note: This includes threads from ALL channels the bot can see.
             return threads
         except requests.exceptions.RequestException as e:
             print(f"Error fetching active guild threads: {e}")
@@ -149,7 +148,7 @@ def get_archived_threads(channel_id, limit=50, public=True):
     """Fetches archived threads (public or private) for a specific channel."""
     thread_type = "public" if public else "private"
     url = f"{DISCORD_API_URL}/channels/{channel_id}/threads/archived/{thread_type}?limit={limit}"
-    # print(f"Fetching archived {thread_type} threads for channel {channel_id}...")
+    # print(f"Fetching archived {thread_type} threads for channel {channel_id}...") # Reduce noise
     while True:
         try:
             response = requests.get(url, headers=HEADERS)
@@ -169,40 +168,38 @@ def get_archived_threads(channel_id, limit=50, public=True):
 
 def check_if_summarized_in_thread(url_to_check, thread_id):
     """Checks if a URL has already been posted in a specific thread."""
-    # print(f"  Checking messages within thread {thread_id} for URL: {url_to_check}")
+    # print(f"  Checking messages within thread {thread_id} for URL: {url_to_check}") # Reduce noise
     messages = get_channel_messages(thread_id, SUMMARY_CHECK_LIMIT)
     if messages is None:
         print(f"    Could not fetch messages from thread {thread_id}.")
         return False
     for message in messages:
         if url_to_check in message.get("content", ""):
-            # print(f"    URL found in thread message {message['id']}")
+            # print(f"    URL found in thread message {message['id']}") # Reduce noise
             return True
     return False
 
 def check_if_summarized_in_forum(forum_channel_id, url_to_check, thread_limit=FORUM_SEARCH_THREAD_LIMIT):
     """Checks if a URL exists in recent active or archived public threads of a specific forum channel."""
-    # print(f"Checking forum {forum_channel_id} history for previous summary of: {url_to_check}")
+    print(f"Checking forum {forum_channel_id} history for previous summary of: {url_to_check}")
 
     threads_to_check = []
-    checked_thread_ids = set() # Keep track of IDs to avoid double-checking
+    checked_thread_ids = set()
 
     # 1. Get active threads in the guild and filter by parent_id
     active_guild_threads = get_active_guild_threads(GUILD_ID)
     active_forum_threads = []
     for thread in active_guild_threads:
-        if thread.get('parent_id') == str(forum_channel_id): # parent_id is string
+        if thread.get('parent_id') == str(forum_channel_id):
              active_forum_threads.append(thread)
-             checked_thread_ids.add(thread.get('id')) # Add ID here
-    # print(f"Found {len(active_forum_threads)} active threads in target forum.")
+             checked_thread_ids.add(thread.get('id'))
+    # print(f"Found {len(active_forum_threads)} active threads in target forum.") # Reduce noise
     threads_to_check.extend(active_forum_threads)
 
     # 2. Get recent archived public threads from the specific forum channel
-    # Adjust limit based on how many active threads we already plan to check
     remaining_limit = max(0, thread_limit - len(threads_to_check))
     if remaining_limit > 0:
         archived_threads = get_archived_threads(forum_channel_id, limit=remaining_limit, public=True)
-        # Only add archived threads we haven't already seen in the active list
         for thread in archived_threads:
             if thread.get('id') not in checked_thread_ids:
                 threads_to_check.append(thread)
@@ -210,23 +207,21 @@ def check_if_summarized_in_forum(forum_channel_id, url_to_check, thread_limit=FO
 
     # 3. Check messages within each relevant thread
     checked_thread_count = 0
-    for thread in threads_to_check: # Now iterates through combined active/archived list
+    for thread in threads_to_check:
         thread_id = thread.get('id')
         thread_name = thread.get('name', 'Unknown Thread')
-        # No need to check thread_id again, already handled by set
 
-        # Limit how many distinct threads we actually check messages in
         if checked_thread_count >= thread_limit:
              print(f"  Reached thread check limit ({thread_limit}). Stopping forum search.")
              break
 
         checked_thread_count += 1
-        print(f"  Checking thread (Active/Archived): {thread_name} ({thread_id})")
+        # print(f"  Checking thread (Active/Archived): {thread_name} ({thread_id})") # Reduce noise
         if check_if_summarized_in_thread(url_to_check, thread_id):
-            #  print(f"    URL found in thread {thread_id}.")
+             print(f"    URL found in thread {thread_id}.")
              return True
 
-    # print(f"URL {url_to_check} not found in checked forum threads.")
+    # print(f"URL {url_to_check} not found in checked forum threads.") # Reduce noise
     return False
 
 
@@ -303,7 +298,6 @@ def find_daily_thread(forum_channel_id, post_title):
         for message in messages:
             thread_info = message.get("thread")
             if thread_info and thread_info.get("name") == post_title:
-                # Verify it wasn't found in the active list already
                 thread_id = thread_info.get("id")
                 is_active = any(t.get('id') == thread_id for t in active_guild_threads if t.get('parent_id') == str(forum_channel_id))
                 if not is_active:
@@ -351,185 +345,37 @@ def format_summaries(summaries_dict, max_length=MAX_MESSAGE_LENGTH):
     """
     Formats the collected summaries into one or more message strings,
     respecting the max_length. Returns a list of strings.
+    (Modified to handle single summary input for immediate posting)
     """
     message_chunks = []
     current_chunk = ""
     if not summaries_dict: return []
-    for url, [summary,channel_name] in summaries_dict.items():
-        entry = f"**URL {channel_name}:** {url}\n**Summary:**\n{summary}\n\n---\n\n"
+
+    # Expecting {url: [summary_text, channel_name]}
+    for url, summary_data in summaries_dict.items():
+        summary, channel_name = summary_data
+        entry = f"**URL ({channel_name}):** {url}\n**Summary:**\n{summary}\n\n---\n\n"
         entry_len = len(entry)
+
         if entry_len > max_length:
-            # print(f"Warning: Single summary for {url} exceeds max length ({entry_len}). Splitting summary.")
-            url_line = f"**URL:** {url}\n**Summary:**\n"
+            print(f"Warning: Single summary for {url} exceeds max length ({entry_len}). Splitting summary.")
+            url_line = f"**URL ({channel_name}):** {url}\n**Summary:**\n"
             separator = "\n\n---\n\n"
             remaining_len = max_length - len(url_line) - len(separator)
             summary_parts = [summary[i : i + remaining_len] for i in range(0, len(summary), remaining_len)]
             for i, part in enumerate(summary_parts):
                 part_entry = url_line + part + (f"\n...(continued)\n{separator}" if i < len(summary_parts) - 1 else f"\n{separator}")
-                if len(current_chunk) + len(part_entry) > max_length and current_chunk:
-                    message_chunks.append(current_chunk.strip())
-                    current_chunk = part_entry
-                else: current_chunk += part_entry
-        elif len(current_chunk) + entry_len > max_length:
+                # Since we format one summary at a time, each part becomes a chunk
+                message_chunks.append(part_entry.strip())
+            current_chunk = "" # Reset chunk after splitting
+        elif len(current_chunk) + entry_len > max_length: # Should not happen when formatting one summary
             message_chunks.append(current_chunk.strip())
             current_chunk = entry
-        else: current_chunk += entry
+        else:
+            current_chunk += entry
+
     if current_chunk: message_chunks.append(current_chunk.strip())
     return message_chunks
-
-# --- Refactored Message Processing Logic ---
-
-def process_message(message, processed_urls_status, current_target_thread_id, post_title,channel_name):
-    """
-    Processes a single message: extracts URL, checks duplicates, summarizes, and posts.
-    Returns the potentially updated target_thread_id and the updated processed_urls_status.
-    """
-    # print(f"\n--- Checking Message ID: {message.get('id')} ---")
-    content = message.get("content", "")
-    # embeds = message.get("embeds", [])
-    # author_info = message.get("author", {})
-    # author_name = author_info.get("username", "Unknown")
-    # is_bot = author_info.get("bot", False)
-
-    # print(f"  Author: {author_name} (Bot: {is_bot})")
-    # print(f"  Content Snippet: {content[:100]}...")
-    # print(f"  Embeds Found: {len(embeds)}")
-
-    # if is_bot: return current_target_thread_id, processed_urls_status # Bot check is commented out
-
-    url_regex = r"(https?://[^\s]+)"
-    urls = re.findall(url_regex, content)
-    if not urls and embeds:
-        for embed in embeds:
-            if embed.get("url"): urls.append(embed["url"])
-
-    if not urls:
-        return current_target_thread_id, processed_urls_status
-
-    url_to_process = urls[0]
-    # print(f"  Checking URL from {author_name}: {url_to_process}")
-
-    if url_to_process in processed_urls_status:
-        # print(f"    Skipping (already processed in this run - status: {processed_urls_status[url_to_process]}).")
-        return current_target_thread_id, processed_urls_status
-
-    # --- Forum-wide duplicate check (Active & Archived) ---
-    if check_if_summarized_in_forum(FORUM_CHANNEL_ID, url_to_process):
-        # print(f"    Skipping (already summarized in a recent forum thread).")
-        processed_urls_status[url_to_process] = "DUPLICATE_FORUM"
-        return current_target_thread_id, processed_urls_status
-    # --- End Forum Check ---
-
-    summary_text = None
-    print(f"    Attempting to summarize...")
-    if "x.com" in url_to_process:
-        # print(f"      Skipping x.com URL.")
-        processed_urls_status[url_to_process] = "SKIPPED_XCOM"
-    elif "youtube.com" in url_to_process or "youtu.be" in url_to_process:
-        print(f"      Processing as YouTube URL...")
-        try:
-            summary_text = generate_yt(url_to_process)
-            print(f"      generate_yt result: {'<empty>' if not summary_text else summary_text[:50] + '...'}")
-        except Exception as e:
-            print(f"      Exception during generate_yt: {e}")
-            summary_text = None
-    else:
-        # print(f"      Processing as general URL...")
-        text_content = None
-        try:
-            # print(f"        Attempting to scrape web page...")
-            text_content = scrape_web_page(url_to_process)
-            # print(f"        scrape_web_page result: {'<empty or failed>' if not text_content else str(len(text_content)) + ' chars'}")
-        except Exception as e:
-            print(f"        Exception during scrape_web_page: {e}")
-
-        if text_content:
-            prompt = f"Summarize this content concisely, focusing on the key information:\n\n{text_content}"
-            try:
-                # print(f"        Attempting to generate summary from scraped text...")
-                summary_text = generate(prompt)
-                # print(f"        generate result: {'<empty>' if not summary_text else summary_text[:50] + '...'}")
-                if not summary_text: print("        Summary generation returned empty string.")
-            except Exception as e:
-                print(f"        Exception during generate: {e}")
-                summary_text = None
-        else:
-             processed_urls_status[url_to_process] = "FAILED_SCRAPE"
-
-
-    if summary_text:
-        summary_text = summary_text.strip()
-        if summary_text:
-            print(f"    Successfully summarized.")
-            processed_urls_status[url_to_process] = "SUMMARIZED"
-
-            print(f"    Attempting to post summary for {url_to_process}...")
-            post_successful = False
-            thread_created_this_time = False
-            temp_target_thread_id = current_target_thread_id
-
-            if temp_target_thread_id is None:
-                print("      Thread ID unknown, attempting to find or create...")
-                temp_target_thread_id = find_daily_thread(FORUM_CHANNEL_ID, post_title)
-                if temp_target_thread_id is None:
-                    print("      Existing thread not found, creating new one...")
-                    formatted_chunks = format_summaries({url_to_process: [summary_text,channel_name]})
-                    if formatted_chunks:
-                        first_chunk = formatted_chunks.pop(0)
-                        temp_target_thread_id = create_daily_thread(FORUM_CHANNEL_ID, post_title, first_chunk)
-                        if temp_target_thread_id:
-                            print(f"      Successfully created thread {temp_target_thread_id} with first summary.")
-                            thread_created_this_time = True
-                            for i, chunk in enumerate(formatted_chunks):
-                                print(f"        Sending chunk {i+1}/{len(formatted_chunks)} for initial summary...")
-                                if not send_message_to_thread(temp_target_thread_id, chunk):
-                                    print(f"        Failed to send chunk {i+1}. Summary may be incomplete.")
-                                    processed_urls_status[url_to_process] = "POST_FAILED_CHUNK"
-                                    break
-                                time.sleep(1)
-                            else: post_successful = True
-                        else:
-                            print("      Failed to create thread.")
-                            processed_urls_status[url_to_process] = "POST_FAILED_THREAD_CREATE"
-                    else:
-                        print("      Failed to format summary for initial thread post.")
-                        processed_urls_status[url_to_process] = "POST_FAILED_FORMATTING"
-                else:
-                    print(f"      Found existing thread {temp_target_thread_id}.")
-
-            if temp_target_thread_id is not None and not thread_created_this_time:
-                print(f"      Posting summary to existing/found thread {temp_target_thread_id}...")
-                formatted_chunks = format_summaries({url_to_process: [summary_text,channel_name]})
-                if formatted_chunks:
-                    for i, chunk in enumerate(formatted_chunks):
-                        print(f"        Sending chunk {i+1}/{len(formatted_chunks)}...")
-                        if not send_message_to_thread(temp_target_thread_id, chunk):
-                            print(f"        Failed to send chunk {i+1}. Summary post failed.")
-                            processed_urls_status[url_to_process] = "POST_FAILED_CHUNK"
-                            break
-                        time.sleep(1)
-                    else: post_successful = True
-                else:
-                    print("      Failed to format summary for posting.")
-                    processed_urls_status[url_to_process] = "POST_FAILED_FORMATTING"
-
-            if post_successful:
-                processed_urls_status[url_to_process] = "SUMMARIZED_POSTED"
-                current_target_thread_id = temp_target_thread_id # Persist the found/created ID
-            elif url_to_process not in processed_urls_status:
-                processed_urls_status[url_to_process] = "POST_FAILED_UNKNOWN"
-
-        else:
-            print(f"    Summary generation resulted in empty string.")
-            processed_urls_status[url_to_process] = "FAILED_EMPTY_SUMMARY"
-    else:
-        if url_to_process not in processed_urls_status:
-             print(f"    Failed to generate summary.")
-             processed_urls_status[url_to_process] = "FAILED_SUMMARY"
-
-    time.sleep(1)
-    return current_target_thread_id, processed_urls_status
-
 
 # --- Main Logic ---
 
@@ -541,8 +387,8 @@ def main():
     post_title = f"Summary for {today_str} ({day_name})"
     print(f"Target post title: {post_title}")
 
-    target_thread_id = None
-    processed_urls_status = {}
+    target_thread_id = None # Thread ID for the *current day*
+    processed_urls_status = {} # Track URLs processed in this run
 
     print("\n--- Fetching messages, Summarizing, and Posting Incrementally ---")
 
@@ -562,41 +408,165 @@ def main():
                 if channel.get("type") == 0 and channel.get("parent_id") == category_id:
                     channel_id_int = int(channel.get("id"))
                     if channel_id_int != FORUM_CHANNEL_ID:
-                        if channel.get("name") != 'jp':
-                            category_channels_to_process.append(
-                                {"id": channel_id_int, "name": channel.get("name", f"Channel {channel_id_int}")}
-                            )
+                        category_channels_to_process.append(
+                            {"id": channel_id_int, "name": channel.get("name", f"Channel {channel_id_int}")}
+                        )
                         print(f"  + Found text channel '{channel.get('name')}' ({channel_id_int}) in category.")
                     else:
                         print(f"  - Skipping channel '{channel.get('name')}' ({channel_id_int}) as it's the target forum channel.")
-            print(f"Identified {len(category_channels_to_process)} channels to process in category '{BOT_CATEGORY_NAME}'.")
-        else:
-            print(f"Warning: Category '{BOT_CATEGORY_NAME}' not found in guild {GUILD_ID}.")
-    else:
-        print("Warning: Could not fetch guild channels. Cannot process category channels.")
+            print(f"Identified {len(category_channels_to_process)} channels to process.")
+        else: print(f"Warning: Category '{BOT_CATEGORY_NAME}' not found.")
+    else: print("Warning: Could not fetch guild channels.")
 
     if not category_channels_to_process:
         print("No category channels to process.")
-    else:
-        for channel_info in category_channels_to_process:
-            channel_id = channel_info["id"]
-            channel_name = channel_info["name"]
-            print(f"\nProcessing category channel: {channel_name} ({channel_id})")
+        return
 
-            messages = get_channel_messages(channel_id, MESSAGE_FETCH_LIMIT)
-            if not messages:
-                print(f"No messages found or error fetching from channel {channel_name} ({channel_id}).")
-                continue
+    # --- Process Channels ---
+    for channel_info in category_channels_to_process:
+        channel_id = channel_info["id"]
+        channel_name = channel_info["name"]
+        print(f"\nProcessing channel: {channel_name} ({channel_id})")
 
-            print(f"Fetched {len(messages)} messages from channel {channel_name} ({channel_id})")
-            for message in reversed(messages):
-                 target_thread_id, processed_urls_status = process_message(
-                     message,
-                     processed_urls_status,
-                     target_thread_id,
-                     post_title,
-                     channel_name
-                 )
+        messages = get_channel_messages(channel_id, MESSAGE_FETCH_LIMIT)
+        if not messages: continue
+
+        print(f"Fetched {len(messages)} messages.")
+        for message in reversed(messages):
+            # print(f"\n--- Checking Message ID: {message.get('id')} ---") # Reduce noise
+            content = message.get("content", "")
+            embeds = message.get("embeds", [])
+            author_info = message.get("author", {})
+            author_name = author_info.get("username", "Unknown")
+            # is_bot = author_info.get("bot", False) # Bot check commented out
+
+            url_regex = r"(https?://[^\s]+)"
+            urls = re.findall(url_regex, content)
+            if not urls and embeds:
+                for embed in embeds:
+                    if embed.get("url"): urls.append(embed["url"])
+
+            if urls:
+                url_to_process = urls[0]
+                # print(f"  Checking URL from {author_name}: {url_to_process}") # Reduce noise
+
+                if url_to_process in processed_urls_status:
+                    # print(f"    Skipping (already processed in this run - status: {processed_urls_status[url_to_process]}).") # Reduce noise
+                    continue
+
+                if check_if_summarized_in_forum(FORUM_CHANNEL_ID, url_to_process):
+                    print(f"    Skipping (already summarized in forum): {url_to_process}")
+                    processed_urls_status[url_to_process] = "DUPLICATE_FORUM"
+                    continue
+
+                # --- Generate Summary ---
+                summary_text = None
+                print(f"    Attempting to summarize: {url_to_process}")
+                if "x.com" in url_to_process:
+                    print(f"      Skipping x.com URL.")
+                    processed_urls_status[url_to_process] = "SKIPPED_XCOM"
+                elif "youtube.com" in url_to_process or "youtu.be" in url_to_process:
+                    print(f"      Processing as YouTube URL...")
+                    try:
+                        summary_text = generate_yt(url_to_process)
+                    except Exception as e:
+                        print(f"      Exception during generate_yt: {e}")
+                        summary_text = None
+                else:
+                    # print(f"      Processing as general URL...") # Reduce noise
+                    text_content = None
+                    try:
+                        text_content = scrape_web_page(url_to_process)
+                    except Exception as e:
+                        print(f"        Exception during scrape_web_page: {e}")
+
+                    if text_content:
+                        prompt = f"Summarize the key points of the following content concisely using bullet points (use '*' or '-'):\n\n{text_content}"
+                        try:
+                            summary_text = generate(prompt)
+                            if not summary_text: print("        Summary generation returned empty string.")
+                        except Exception as e:
+                            print(f"        Exception during generate: {e}")
+                            summary_text = None
+                    else:
+                         processed_urls_status[url_to_process] = "FAILED_SCRAPE"
+
+                # --- Post Summary if Generated ---
+                if summary_text:
+                    summary_text = summary_text.strip()
+                    if summary_text:
+                        print(f"    Successfully summarized.")
+                        processed_urls_status[url_to_process] = "SUMMARIZED"
+
+                        print(f"    Attempting to post summary for {url_to_process}...")
+                        post_successful = False
+                        thread_created_this_time = False
+                        temp_target_thread_id = target_thread_id # Use the ID found/created earlier in this run
+
+                        # Find or create the thread *only if we haven't already* in this run
+                        if temp_target_thread_id is None:
+                            print("      Thread ID unknown for this run, attempting to find or create...")
+                            temp_target_thread_id = find_daily_thread(FORUM_CHANNEL_ID, post_title)
+                            if temp_target_thread_id is None:
+                                print("      Existing thread not found, creating new one...")
+                                formatted_chunks = format_summaries({url_to_process: [summary_text, channel_name]})
+                                if formatted_chunks:
+                                    first_chunk = formatted_chunks.pop(0)
+                                    temp_target_thread_id = create_thread(FORUM_CHANNEL_ID, post_title, first_chunk)
+                                    if temp_target_thread_id:
+                                        print(f"      Successfully created thread {temp_target_thread_id} with first summary.")
+                                        thread_created_this_time = True
+                                        # Post remaining chunks for this summary
+                                        for i, chunk in enumerate(formatted_chunks):
+                                            print(f"        Sending chunk {i+1}/{len(formatted_chunks)} for initial summary...")
+                                            if not send_message_to_thread(temp_target_thread_id, chunk):
+                                                print(f"        Failed to send chunk {i+1}. Summary may be incomplete.")
+                                                processed_urls_status[url_to_process] = "POST_FAILED_CHUNK"
+                                                break
+                                            time.sleep(1)
+                                        else: post_successful = True # Only successful if all chunks sent
+                                    else:
+                                        print("      Failed to create thread.")
+                                        processed_urls_status[url_to_process] = "POST_FAILED_THREAD_CREATE"
+                                else:
+                                    print("      Failed to format summary for initial thread post.")
+                                    processed_urls_status[url_to_process] = "POST_FAILED_FORMATTING"
+                            else:
+                                print(f"      Found existing thread {temp_target_thread_id}.")
+                                target_thread_id = temp_target_thread_id # Persist found ID for the rest of the run
+
+                        # Post to the thread (if ID is known and wasn't just created)
+                        if temp_target_thread_id is not None and not thread_created_this_time:
+                            print(f"      Posting summary to existing/found thread {temp_target_thread_id}...")
+                            formatted_chunks = format_summaries({url_to_process: [summary_text, channel_name]})
+                            if formatted_chunks:
+                                for i, chunk in enumerate(formatted_chunks):
+                                    print(f"        Sending chunk {i+1}/{len(formatted_chunks)}...")
+                                    if not send_message_to_thread(temp_target_thread_id, chunk):
+                                        print(f"        Failed to send chunk {i+1}. Summary post failed.")
+                                        processed_urls_status[url_to_process] = "POST_FAILED_CHUNK"
+                                        break
+                                    time.sleep(1)
+                                else: post_successful = True
+                            else:
+                                print("      Failed to format summary for posting.")
+                                processed_urls_status[url_to_process] = "POST_FAILED_FORMATTING"
+
+                        # Update status
+                        if post_successful:
+                            processed_urls_status[url_to_process] = "SUMMARIZED_POSTED"
+                        elif url_to_process not in processed_urls_status:
+                            processed_urls_status[url_to_process] = "POST_FAILED_UNKNOWN"
+
+                    else: # Summary was empty string
+                        print(f"    Summary generation resulted in empty string.")
+                        processed_urls_status[url_to_process] = "FAILED_EMPTY_SUMMARY"
+                else: # Summary generation failed (None)
+                    if url_to_process not in processed_urls_status: # Don't overwrite specific failure codes
+                         print(f"    Failed to generate summary.")
+                         processed_urls_status[url_to_process] = "FAILED_SUMMARY"
+
+                time.sleep(1) # Delay between processing URLs
 
     print("\nScript finished.")
 
