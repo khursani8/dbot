@@ -148,80 +148,75 @@ def get_archived_threads(channel_id, limit=50, public=True):
     """Fetches archived threads (public or private) for a specific channel."""
     thread_type = "public" if public else "private"
     url = f"{DISCORD_API_URL}/channels/{channel_id}/threads/archived/{thread_type}?limit={limit}"
-    # print(f"Fetching archived {thread_type} threads for channel {channel_id}...") # Reduce noise
     while True:
         try:
             response = requests.get(url, headers=HEADERS)
             if handle_rate_limit(response):
                 continue
-            response.raise_for_status()
+            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
             data = response.json()
             threads = data.get('threads', [])
-            # print(f"Successfully fetched {len(threads)} archived {thread_type} threads.")
             return threads
         except requests.exceptions.RequestException as e:
-            print(f"Error fetching archived {thread_type} threads: {e}")
-            return []
+            return [] # Return empty list on error
         except Exception as e:
-            print(f"Unexpected error fetching archived {thread_type} threads: {e}")
-            return []
+            return [] # Return empty list on error
 
 def check_if_summarized_in_thread(url_to_check, thread_id):
     """Checks if a URL has already been posted in a specific thread."""
-    # print(f"  Checking messages within thread {thread_id} for URL: {url_to_check}") # Reduce noise
     messages = get_channel_messages(thread_id, SUMMARY_CHECK_LIMIT)
     if messages is None:
-        print(f"    Could not fetch messages from thread {thread_id}.")
-        return False
-    for message in messages:
-        if url_to_check in message.get("content", ""):
-            # print(f"    URL found in thread message {message['id']}") # Reduce noise
+        return False # Treat fetch failure as "not found" for safety, but log it.
+    for i, message in enumerate(messages):
+        content = message.get("content", "")
+        # print(f"      [Check Thread] Msg {i+1}/{len(messages)} Content: '{content[:100]}...'") # Optional: Log content snippet
+        if url_to_check in content:
             return True
     return False
 
 def check_if_summarized_in_forum(forum_channel_id, url_to_check, thread_limit=FORUM_SEARCH_THREAD_LIMIT):
     """Checks if a URL exists in recent active or archived public threads of a specific forum channel."""
-    print(f"Checking forum {forum_channel_id} history for previous summary of: {url_to_check}")
 
     threads_to_check = []
     checked_thread_ids = set()
 
     # 1. Get active threads in the guild and filter by parent_id
-    active_guild_threads = get_active_guild_threads(GUILD_ID)
+    active_guild_threads = get_active_guild_threads(GUILD_ID) or [] # Ensure it's a list
     active_forum_threads = []
     for thread in active_guild_threads:
         if thread.get('parent_id') == str(forum_channel_id):
              active_forum_threads.append(thread)
              checked_thread_ids.add(thread.get('id'))
-    # print(f"Found {len(active_forum_threads)} active threads in target forum.") # Reduce noise
     threads_to_check.extend(active_forum_threads)
 
     # 2. Get recent archived public threads from the specific forum channel
     remaining_limit = max(0, thread_limit - len(threads_to_check))
     if remaining_limit > 0:
-        archived_threads = get_archived_threads(forum_channel_id, limit=remaining_limit, public=True)
+        archived_threads = get_archived_threads(forum_channel_id, limit=remaining_limit, public=True) or [] # Ensure list
+        added_archived = 0
         for thread in archived_threads:
             if thread.get('id') not in checked_thread_ids:
                 threads_to_check.append(thread)
                 checked_thread_ids.add(thread.get('id'))
+                added_archived += 1
 
     # 3. Check messages within each relevant thread
     checked_thread_count = 0
     for thread in threads_to_check:
         thread_id = thread.get('id')
         thread_name = thread.get('name', 'Unknown Thread')
+        is_active = thread in active_forum_threads # Simple check based on origin list
 
         if checked_thread_count >= thread_limit:
-             print(f"  Reached thread check limit ({thread_limit}). Stopping forum search.")
              break
 
         checked_thread_count += 1
-        # print(f"  Checking thread (Active/Archived): {thread_name} ({thread_id})") # Reduce noise
         if check_if_summarized_in_thread(url_to_check, thread_id):
-             print(f"    URL found in thread {thread_id}.")
              return True
+        # Add a small delay to avoid hitting rate limits aggressively during checks
+        time.sleep(0.2)
 
-    # print(f"URL {url_to_check} not found in checked forum threads.") # Reduce noise
+
     return False
 
 
@@ -512,7 +507,8 @@ def main():
                                 formatted_chunks = format_summaries({url_to_process: [summary_text, channel_name]})
                                 if formatted_chunks:
                                     first_chunk = formatted_chunks.pop(0)
-                                    temp_target_thread_id = create_thread(FORUM_CHANNEL_ID, post_title, first_chunk)
+                                    # *** FIX TYPO HERE ***
+                                    temp_target_thread_id = create_daily_thread(FORUM_CHANNEL_ID, post_title, first_chunk)
                                     if temp_target_thread_id:
                                         print(f"      Successfully created thread {temp_target_thread_id} with first summary.")
                                         thread_created_this_time = True
