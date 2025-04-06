@@ -1,0 +1,35 @@
+name: Discord Summarizer
+
+on:
+  schedule:
+    # Runs every 10 minutes
+    - cron: '*/10 * * * *'
+  workflow_dispatch: # Allows manual triggering from the Actions tab
+
+jobs:
+  summarize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10' # Or your preferred Python version
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install required packages from requirements.txt (should include requests now)
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run summarizer script
+        env:
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          SOURCE_CHANNEL_IDS: ${{ secrets.SOURCE_CHANNEL_IDS }} # Should be a JSON string list, e.g., '["123", "456"]'
+          TARGET_CHANNEL_ID: ${{ secrets.TARGET_CHANNEL_ID }}
+          SUMMARY_CHANNEL_ID: ${{ secrets.SUMMARY_CHANNEL_ID }}
+          BOT_CATEGORY_NAME: ${{ secrets.BOT_CATEGORY_NAME || 'BOT' }} # Use secret or default to 'BOT'
+        run: python summarize_github_action.py
