@@ -59,7 +59,7 @@ except ValueError:
 
 # --- Constants ---
 DISCORD_API_URL = "https://discord.com/api/v10"
-MESSAGE_FETCH_LIMIT = 50  # How many recent messages to check per source channel (adjust as needed)
+MESSAGE_FETCH_LIMIT = 20  # How many recent messages to check per source channel (adjust as needed)
 FORUM_THREAD_CHECK_LIMIT = 5 # How many messages to check in the forum channel to find today's post
 SUMMARY_CHECK_LIMIT = 2000 # How many messages to check within a thread for duplicates
 FORUM_SEARCH_THREAD_LIMIT = 5 # How many active/archived threads to search for duplicates
@@ -402,7 +402,7 @@ def main():
             for channel in all_channels:
                 if channel.get("type") == 0 and channel.get("parent_id") == category_id:
                     channel_id_int = int(channel.get("id"))
-                    if channel_id_int != FORUM_CHANNEL_ID:
+                    if channel.get("name") not in ["jp","paper"]:
                         category_channels_to_process.append(
                             {"id": channel_id_int, "name": channel.get("name", f"Channel {channel_id_int}")}
                         )
