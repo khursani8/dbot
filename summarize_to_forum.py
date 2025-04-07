@@ -61,8 +61,8 @@ except ValueError:
 DISCORD_API_URL = "https://discord.com/api/v10"
 MESSAGE_FETCH_LIMIT = 50  # How many recent messages to check per source channel (adjust as needed)
 FORUM_THREAD_CHECK_LIMIT = 5 # How many messages to check in the forum channel to find today's post
-SUMMARY_CHECK_LIMIT = 50 # How many messages to check within a thread for duplicates
-FORUM_SEARCH_THREAD_LIMIT = 25 # How many active/archived threads to search for duplicates
+SUMMARY_CHECK_LIMIT = 2000 # How many messages to check within a thread for duplicates
+FORUM_SEARCH_THREAD_LIMIT = 5 # How many active/archived threads to search for duplicates
 
 HEADERS = {
     "Authorization": f"Bot {TOKEN}",
