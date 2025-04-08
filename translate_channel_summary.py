@@ -305,8 +305,15 @@ def main():
                 summary_text = summary_text.strip()
                 if summary_text: # Check again after stripping
                     print(f"  Summary generated successfully.")
-                    # Format the message for the target channel, including the URL
-                    output_message = f"**Summary from #{SOURCE_CHANNEL_NAME} (by {author_name}):**\n{url_to_process}\n\n{summary_text}\n\n*Original message ID: {message_id}*"
+                    # Construct the original message link
+                    original_message_link = f"https://discord.com/channels/{GUILD_ID}/{source_channel_id}/{message_id}"
+                    # Format the message for the target channel, including the URL and original message link
+                    output_message = (
+                        f"**Summary from #{SOURCE_CHANNEL_NAME} (by {author_name}):**\n"
+                        f"URL: {url_to_process}\n\n"
+                        f"{summary_text}\n\n"
+                        f"*Original Message: <{original_message_link}>*" # Use angle brackets to prevent embed
+                    )
 
                     print(f"  Attempting to post summary to #{TARGET_CHANNEL_NAME} ({target_channel_id})...")
                     post_successful = send_discord_message(target_channel_id, output_message)
