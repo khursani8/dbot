@@ -402,7 +402,7 @@ def main():
             for channel in all_channels:
                 if channel.get("type") == 0 and channel.get("parent_id") == category_id:
                     channel_id_int = int(channel.get("id"))
-                    if channel.get("name") not in ["jp","paper"]:
+                    if channel.get("name") not in ["jp","paper","en"]:
                         category_channels_to_process.append(
                             {"id": channel_id_int, "name": channel.get("name", f"Channel {channel_id_int}")}
                         )
