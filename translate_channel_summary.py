@@ -3,7 +3,7 @@ import time
 import os
 import json
 import re
-from datetime import datetime, UTC
+from datetime import datetime
 # Import scraping and generation functions from utils
 from utils import generate, scrape_web_page, generate_yt
 from dotenv import load_dotenv
