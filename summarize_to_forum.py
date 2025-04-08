@@ -3,7 +3,7 @@ import time
 import os
 import json
 import re
-from datetime import datetime, UTC, timedelta # Import timedelta
+from datetime import datetime, timedelta # Import timedelta
 from utils import (
     scrape_web_page,
     generate,
@@ -390,7 +390,7 @@ def format_summaries(summaries_dict, max_length=MAX_MESSAGE_LENGTH):
 
 def main():
     print("Starting forum summarizer script...")
-    now = datetime.now(UTC)
+    now = datetime.now()
     today_str = now.strftime("%Y-%m-%d")
     day_name = now.strftime("%A")
     post_title = f"Summary for {today_str} ({day_name})"
