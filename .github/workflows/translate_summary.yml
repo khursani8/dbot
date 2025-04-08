@@ -1,0 +1,46 @@
+name: Translate Channel Summary
+
+on:
+  schedule:
+    # Runs every hour
+    - cron: '0 * * * *'
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  translate_and_summarize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10' # Or your preferred Python version
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download previous processed URLs artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: processed-urls-translate
+          path: . # Download to the root directory
+        # Continue even if artifact doesn't exist (first run)
+        continue-on-error: true
+
+      - name: Run translation summary script
+        env:
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          GUILD_ID: ${{ secrets.GUILD_ID }}
+          CI: true # Indicate CI environment for the script
+        run: python translate_channel_summary.py
+
+      - name: Upload processed URLs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: processed-urls-translate
+          path: processed_urls_translate.json
+          if-no-files-found: error # Fail if the file wasn't created/updated
