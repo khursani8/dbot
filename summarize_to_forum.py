@@ -59,6 +59,7 @@ except ValueError:
 
 # --- Constants ---
 DISCORD_API_URL = "https://discord.com/api/v10"
+PROCESSED_URLS_FILE = "processed_urls.json" # File to store processed URLs
 MESSAGE_FETCH_LIMIT = 20  # How many recent messages to check per source channel (adjust as needed)
 FORUM_THREAD_CHECK_LIMIT = 5 # How many messages to check in the forum channel to find today's post
 SUMMARY_CHECK_LIMIT = 100 # How many messages to check within a thread for duplicates (Still used by find_daily_thread fallback?) - Let's keep for now, might remove later if find_daily_thread is refactored.
@@ -137,6 +138,35 @@ def get_all_channel_messages(channel_id):
 
     print(f"Finished fetching. Total messages retrieved for {channel_id}: {len(all_messages)}")
     return all_messages
+
+# --- Persistence Helper Functions ---
+
+def load_processed_urls(filepath=PROCESSED_URLS_FILE):
+    """Loads the set of processed URLs from a JSON file."""
+    try:
+        if os.path.exists(filepath):
+            with open(filepath, 'r') as f:
+                urls = json.load(f)
+                print(f"Loaded {len(urls)} processed URLs from {filepath}")
+                return set(urls)
+        else:
+            print(f"Processed URLs file ({filepath}) not found. Starting fresh.")
+            return set()
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"Error loading processed URLs from {filepath}: {e}. Starting fresh.")
+        return set()
+
+def save_processed_urls(urls_set, filepath=PROCESSED_URLS_FILE):
+    """Saves the set of processed URLs to a JSON file."""
+    try:
+        with open(filepath, 'w') as f:
+            json.dump(list(urls_set), f, indent=2) # Save as list for readability
+        # print(f"Saved {len(urls_set)} processed URLs to {filepath}") # Reduce noise
+        return True
+    except IOError as e:
+        print(f"Error saving processed URLs to {filepath}: {e}")
+        return False
+
 
 def get_guild_channels(guild_id):
     """Fetches all channels for a given guild ID via HTTP GET."""
@@ -366,41 +396,11 @@ def main():
     post_title = f"Summary for {today_str} ({day_name})"
     print(f"Target post title: {post_title}")
 
-    # --- Previous Day Check Setup ---
-    yesterday = now - timedelta(days=1)
-    yesterday_str = yesterday.strftime("%Y-%m-%d")
-    yesterday_day_name = yesterday.strftime("%A")
-    previous_day_thread_title = f"Summary for {yesterday_str} ({yesterday_day_name})"
-    previous_day_thread_id = None
-    previous_day_urls = set()
-
-    print(f"\n--- Checking Previous Day's Thread: '{previous_day_thread_title}' ---")
-    previous_day_thread_id = find_daily_thread(FORUM_CHANNEL_ID, previous_day_thread_title)
-
-    if previous_day_thread_id:
-        print(f"Found previous day's thread: {previous_day_thread_id}. Fetching all its messages...")
-        all_previous_messages = get_all_channel_messages(previous_day_thread_id)
-        if all_previous_messages:
-            print(f"Scanning {len(all_previous_messages)} messages from previous day for URLs...")
-            count = 0
-            for msg in all_previous_messages:
-                content = msg.get("content", "")
-                urls_in_msg = extract_urls_from_text(content)
-                if urls_in_msg:
-                    # Add only the first URL from each message to match the later logic?
-                    # Or add all URLs found? Let's add all for a comprehensive check.
-                    previous_day_urls.update(urls_in_msg)
-                    count += len(urls_in_msg) # Count added URLs
-            print(f"Found {len(previous_day_urls)} unique URLs in {count} total occurrences within previous day's thread.")
-        else:
-            print("Could not fetch messages from previous day's thread.")
-    else:
-        print("Previous day's thread not found. Proceeding without checking previous day duplicates.")
+    # --- Load Historically Processed URLs ---
+    historical_urls = load_processed_urls()
 
     target_thread_id = None # Thread ID for the *current day*, persisted across URL processing
-    processed_urls_status = {} # Track URLs processed in this run
-    current_day_urls = set() # Track URLs posted to today's thread (populated when thread found/created)
-    current_day_thread_checked = False # Flag to ensure we only check existing thread once
+    processed_urls_status = {} # Track URLs processed *in this specific run*
 
     print("\n--- Fetching messages from Source Channels, Summarizing, and Posting Incrementally ---")
 
@@ -468,10 +468,10 @@ def main():
                     # print(f"    Skipping (already processed in this run - status: {processed_urls_status[url_to_process]}).") # Reduce noise
                     continue
 
-                # 2. Check if summarized in the *previous day's* thread
-                if url_to_process in previous_day_urls:
-                    print(f"    Skipping (found in previous day's thread '{previous_day_thread_title}'): {url_to_process}")
-                    processed_urls_status[url_to_process] = "DUPLICATE_PREVIOUS_DAY"
+                # 2. Check if URL is in the historical set from the JSON file
+                if url_to_process in historical_urls:
+                    print(f"    Skipping (already processed in a previous run): {url_to_process}")
+                    processed_urls_status[url_to_process] = "DUPLICATE_HISTORICAL"
                     continue
 
                 # --- Generate Summary --- (If not skipped)
@@ -550,49 +550,33 @@ def main():
                             else:
                                 print(f"      Found existing thread {temp_target_thread_id}.")
                                 target_thread_id = temp_target_thread_id # Persist found ID for the rest of the run
-                                # --- Populate current_day_urls if we just found the thread ---
-                                if not current_day_thread_checked:
-                                    print(f"      Scanning existing thread {target_thread_id} for already posted URLs...")
-                                    existing_messages = get_all_channel_messages(target_thread_id)
-                                    if existing_messages:
-                                        count = 0
-                                        for msg in existing_messages:
-                                            urls_in_msg = extract_urls_from_text(msg.get("content", ""))
-                                            if urls_in_msg:
-                                                current_day_urls.update(urls_in_msg)
-                                                count += len(urls_in_msg)
-                                        print(f"      Found {len(current_day_urls)} unique URLs in {count} total occurrences within current day's thread.")
-                                    else:
-                                        print(f"      Could not fetch messages from current day's thread {target_thread_id} to check for duplicates.")
-                                    current_day_thread_checked = True # Mark as checked for this run
+                                # No need to scan current thread anymore, historical_urls covers it
 
                         # Post to the thread (if ID is known and wasn't just created)
                         if temp_target_thread_id is not None and not thread_created_this_time:
-                            # 3. Check if summarized in the *current day's* thread (if already checked)
-                            if url_to_process in current_day_urls:
-                                print(f"    Skipping (found in current day's thread '{post_title}'): {url_to_process}")
-                                processed_urls_status[url_to_process] = "DUPLICATE_CURRENT_DAY"
-                            else:
-                                print(f"      Posting summary to existing/found thread {temp_target_thread_id}...")
-                                formatted_chunks = format_summaries({url_to_process: [summary_text, channel_name]})
-                                if formatted_chunks:
-                                    for i, chunk in enumerate(formatted_chunks):
-                                        print(f"        Sending chunk {i+1}/{len(formatted_chunks)}...")
-                                        if not send_message_to_thread(temp_target_thread_id, chunk):
-                                            print(f"        Failed to send chunk {i+1}. Summary post failed.")
-                                            processed_urls_status[url_to_process] = "POST_FAILED_CHUNK"
-                                            break
-                                        time.sleep(1)
-                                    else: post_successful = True # Mark successful only if all chunks sent
-                                else:
-                                    print("      Failed to format summary for posting.")
-                                    processed_urls_status[url_to_process] = "POST_FAILED_FORMATTING"
+                            # Duplicate check already done using historical_urls
+                            print(f"      Posting summary to existing/found thread {temp_target_thread_id}...")
+                            formatted_chunks = format_summaries({url_to_process: [summary_text, channel_name]})
+                            if formatted_chunks:
+                                for i, chunk in enumerate(formatted_chunks):
+                                    print(f"        Sending chunk {i+1}/{len(formatted_chunks)}...")
+                                    if not send_message_to_thread(temp_target_thread_id, chunk):
+                                        print(f"        Failed to send chunk {i+1}. Summary post failed.")
+                                        processed_urls_status[url_to_process] = "POST_FAILED_CHUNK"
+                                        break
+                                    time.sleep(1)
+                                else: post_successful = True # Mark successful only if all chunks sent
+                            else: # formatted_chunks was empty
+                                print("      Failed to format summary for posting.")
+                                processed_urls_status[url_to_process] = "POST_FAILED_FORMATTING"
 
-                        # Update status and current day URL set
+                        # Update status and save historical URL if successful
                         if post_successful:
                             processed_urls_status[url_to_process] = "SUMMARIZED_POSTED"
-                            current_day_urls.add(url_to_process) # Add successfully posted URL
-                        elif url_to_process not in processed_urls_status:
+                            historical_urls.add(url_to_process) # Add to the set
+                            if not save_processed_urls(historical_urls):
+                                print(f"    WARNING: Failed to save updated processed URLs file after posting {url_to_process}")
+                        elif url_to_process not in processed_urls_status: # Don't overwrite specific failure codes
                             processed_urls_status[url_to_process] = "POST_FAILED_UNKNOWN"
 
                     else: # Summary was empty string
