@@ -3,7 +3,7 @@ import time
 import os
 import json
 import re
-from datetime import datetime, UTC  # Import UTC
+from datetime import datetime, UTC, timedelta # Import timedelta
 from utils import (
     scrape_web_page,
     generate,
@@ -61,8 +61,7 @@ except ValueError:
 DISCORD_API_URL = "https://discord.com/api/v10"
 MESSAGE_FETCH_LIMIT = 20  # How many recent messages to check per source channel (adjust as needed)
 FORUM_THREAD_CHECK_LIMIT = 5 # How many messages to check in the forum channel to find today's post
-SUMMARY_CHECK_LIMIT = 100 # How many messages to check within a thread for duplicates
-FORUM_SEARCH_THREAD_LIMIT = 5 # How many active/archived threads to search for duplicates
+SUMMARY_CHECK_LIMIT = 100 # How many messages to check within a thread for duplicates (Still used by find_daily_thread fallback?) - Let's keep for now, might remove later if find_daily_thread is refactored.
 
 HEADERS = {
     "Authorization": f"Bot {TOKEN}",
@@ -101,6 +100,43 @@ def get_channel_messages(channel_id, limit):
             print(f"Unexpected error fetching messages: {e}")
             return None
 
+def get_all_channel_messages(channel_id):
+    """Fetches ALL messages from a channel/thread, handling pagination."""
+    all_messages = []
+    last_message_id = None
+    limit = 100 # Max limit per request
+
+    print(f"Fetching all messages for channel/thread {channel_id}...")
+    while True:
+        url = f"{DISCORD_API_URL}/channels/{channel_id}/messages?limit={limit}"
+        if last_message_id:
+            url += f"&before={last_message_id}"
+
+        try:
+            response = requests.get(url, headers=HEADERS)
+            if handle_rate_limit(response):
+                continue
+            response.raise_for_status()
+            messages = response.json()
+
+            if not messages:
+                break # No more messages
+
+            all_messages.extend(messages)
+            last_message_id = messages[-1]['id']
+            print(f"  Fetched {len(messages)} messages (Total: {len(all_messages)})...")
+            time.sleep(RATE_LIMIT_SLEEP) # Be nice to the API
+
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching messages batch from channel {channel_id}: {e}")
+            # Decide if we should retry or give up. For now, let's break.
+            break
+        except Exception as e:
+            print(f"Unexpected error fetching all messages: {e}")
+            break # Stop fetching on unexpected errors
+
+    print(f"Finished fetching. Total messages retrieved for {channel_id}: {len(all_messages)}")
+    return all_messages
 
 def get_guild_channels(guild_id):
     """Fetches all channels for a given guild ID via HTTP GET."""
@@ -162,63 +198,11 @@ def get_archived_threads(channel_id, limit=50, public=True):
         except Exception as e:
             return [] # Return empty list on error
 
-def check_if_summarized_in_thread(url_to_check, thread_id):
-    """Checks if a URL has already been posted in a specific thread."""
-    messages = get_channel_messages(thread_id, SUMMARY_CHECK_LIMIT)
-    if messages is None:
-        return False # Treat fetch failure as "not found" for safety, but log it.
-    for i, message in enumerate(messages):
-        content = message.get("content", "")
-        # print(f"      [Check Thread] Msg {i+1}/{len(messages)} Content: '{content[:100]}...'") # Optional: Log content snippet
-        if url_to_check in content:
-            return True
-    return False
-
-def check_if_summarized_in_forum(forum_channel_id, url_to_check, thread_limit=FORUM_SEARCH_THREAD_LIMIT):
-    """Checks if a URL exists in recent active or archived public threads of a specific forum channel."""
-
-    threads_to_check = []
-    checked_thread_ids = set()
-
-    # 1. Get active threads in the guild and filter by parent_id
-    active_guild_threads = get_active_guild_threads(GUILD_ID) or [] # Ensure it's a list
-    active_forum_threads = []
-    for thread in active_guild_threads:
-        if thread.get('parent_id') == str(forum_channel_id):
-             active_forum_threads.append(thread)
-             checked_thread_ids.add(thread.get('id'))
-    threads_to_check.extend(active_forum_threads)
-
-    # 2. Get recent archived public threads from the specific forum channel
-    remaining_limit = max(0, thread_limit - len(threads_to_check))
-    if remaining_limit > 0:
-        archived_threads = get_archived_threads(forum_channel_id, limit=remaining_limit, public=True) or [] # Ensure list
-        added_archived = 0
-        for thread in archived_threads:
-            if thread.get('id') not in checked_thread_ids:
-                threads_to_check.append(thread)
-                checked_thread_ids.add(thread.get('id'))
-                added_archived += 1
-
-    # 3. Check messages within each relevant thread
-    checked_thread_count = 0
-    for thread in threads_to_check:
-        thread_id = thread.get('id')
-        thread_name = thread.get('name', 'Unknown Thread')
-        is_active = thread in active_forum_threads # Simple check based on origin list
-
-        if checked_thread_count >= thread_limit:
-             break
-
-        checked_thread_count += 1
-        if check_if_summarized_in_thread(url_to_check, thread_id):
-             return True
-        # Add a small delay to avoid hitting rate limits aggressively during checks
-        time.sleep(0.2)
-
-
-    return False
-
+# --- URL Extraction Helper ---
+def extract_urls_from_text(text):
+    """Extracts all URLs from a given string."""
+    url_regex = r"(https?://[^\s<>\"']+)" # Improved regex to avoid trailing chars
+    return re.findall(url_regex, text)
 
 def send_discord_message(channel_id, content):
     """Sends a message to a Discord channel/thread via HTTP POST, handling splitting."""
@@ -382,10 +366,43 @@ def main():
     post_title = f"Summary for {today_str} ({day_name})"
     print(f"Target post title: {post_title}")
 
-    target_thread_id = None # Thread ID for the *current day*
-    processed_urls_status = {} # Track URLs processed in this run
+    # --- Previous Day Check Setup ---
+    yesterday = now - timedelta(days=1)
+    yesterday_str = yesterday.strftime("%Y-%m-%d")
+    yesterday_day_name = yesterday.strftime("%A")
+    previous_day_thread_title = f"Summary for {yesterday_str} ({yesterday_day_name})"
+    previous_day_thread_id = None
+    previous_day_urls = set()
 
-    print("\n--- Fetching messages, Summarizing, and Posting Incrementally ---")
+    print(f"\n--- Checking Previous Day's Thread: '{previous_day_thread_title}' ---")
+    previous_day_thread_id = find_daily_thread(FORUM_CHANNEL_ID, previous_day_thread_title)
+
+    if previous_day_thread_id:
+        print(f"Found previous day's thread: {previous_day_thread_id}. Fetching all its messages...")
+        all_previous_messages = get_all_channel_messages(previous_day_thread_id)
+        if all_previous_messages:
+            print(f"Scanning {len(all_previous_messages)} messages from previous day for URLs...")
+            count = 0
+            for msg in all_previous_messages:
+                content = msg.get("content", "")
+                urls_in_msg = extract_urls_from_text(content)
+                if urls_in_msg:
+                    # Add only the first URL from each message to match the later logic?
+                    # Or add all URLs found? Let's add all for a comprehensive check.
+                    previous_day_urls.update(urls_in_msg)
+                    count += len(urls_in_msg) # Count added URLs
+            print(f"Found {len(previous_day_urls)} unique URLs in {count} total occurrences within previous day's thread.")
+        else:
+            print("Could not fetch messages from previous day's thread.")
+    else:
+        print("Previous day's thread not found. Proceeding without checking previous day duplicates.")
+
+    target_thread_id = None # Thread ID for the *current day*, persisted across URL processing
+    processed_urls_status = {} # Track URLs processed in this run
+    current_day_urls = set() # Track URLs posted to today's thread (populated when thread found/created)
+    current_day_thread_checked = False # Flag to ensure we only check existing thread once
+
+    print("\n--- Fetching messages from Source Channels, Summarizing, and Posting Incrementally ---")
 
     print(f"\nIdentifying channels in category '{BOT_CATEGORY_NAME}' for guild {GUILD_ID}...")
     all_channels = get_guild_channels(GUILD_ID)
@@ -435,26 +452,29 @@ def main():
             author_name = author_info.get("username", "Unknown")
             # is_bot = author_info.get("bot", False) # Bot check commented out
 
-            url_regex = r"(https?://[^\s]+)"
-            urls = re.findall(url_regex, content)
-            if not urls and embeds:
+            # Extract URLs from content and embeds
+            urls_in_message = extract_urls_from_text(content)
+            if embeds:
                 for embed in embeds:
-                    if embed.get("url"): urls.append(embed["url"])
+                    if embed.get("url"): urls_in_message.append(embed["url"])
 
-            if urls:
-                url_to_process = urls[0]
+            # Process the *first* valid URL found in the message
+            if urls_in_message:
+                url_to_process = urls_in_message[0]
                 # print(f"  Checking URL from {author_name}: {url_to_process}") # Reduce noise
 
+                # 1. Check if processed in this run
                 if url_to_process in processed_urls_status:
                     # print(f"    Skipping (already processed in this run - status: {processed_urls_status[url_to_process]}).") # Reduce noise
                     continue
 
-                if check_if_summarized_in_forum(FORUM_CHANNEL_ID, url_to_process):
-                    print(f"    Skipping (already summarized in forum): {url_to_process}")
-                    processed_urls_status[url_to_process] = "DUPLICATE_FORUM"
+                # 2. Check if summarized in the *previous day's* thread
+                if url_to_process in previous_day_urls:
+                    print(f"    Skipping (found in previous day's thread '{previous_day_thread_title}'): {url_to_process}")
+                    processed_urls_status[url_to_process] = "DUPLICATE_PREVIOUS_DAY"
                     continue
 
-                # --- Generate Summary ---
+                # --- Generate Summary --- (If not skipped)
                 summary_text = None
                 print(f"    Attempting to summarize: {url_to_process}")
                 if "x.com" in url_to_process:
@@ -530,27 +550,48 @@ def main():
                             else:
                                 print(f"      Found existing thread {temp_target_thread_id}.")
                                 target_thread_id = temp_target_thread_id # Persist found ID for the rest of the run
+                                # --- Populate current_day_urls if we just found the thread ---
+                                if not current_day_thread_checked:
+                                    print(f"      Scanning existing thread {target_thread_id} for already posted URLs...")
+                                    existing_messages = get_all_channel_messages(target_thread_id)
+                                    if existing_messages:
+                                        count = 0
+                                        for msg in existing_messages:
+                                            urls_in_msg = extract_urls_from_text(msg.get("content", ""))
+                                            if urls_in_msg:
+                                                current_day_urls.update(urls_in_msg)
+                                                count += len(urls_in_msg)
+                                        print(f"      Found {len(current_day_urls)} unique URLs in {count} total occurrences within current day's thread.")
+                                    else:
+                                        print(f"      Could not fetch messages from current day's thread {target_thread_id} to check for duplicates.")
+                                    current_day_thread_checked = True # Mark as checked for this run
 
                         # Post to the thread (if ID is known and wasn't just created)
                         if temp_target_thread_id is not None and not thread_created_this_time:
-                            print(f"      Posting summary to existing/found thread {temp_target_thread_id}...")
-                            formatted_chunks = format_summaries({url_to_process: [summary_text, channel_name]})
-                            if formatted_chunks:
-                                for i, chunk in enumerate(formatted_chunks):
-                                    print(f"        Sending chunk {i+1}/{len(formatted_chunks)}...")
-                                    if not send_message_to_thread(temp_target_thread_id, chunk):
-                                        print(f"        Failed to send chunk {i+1}. Summary post failed.")
-                                        processed_urls_status[url_to_process] = "POST_FAILED_CHUNK"
-                                        break
-                                    time.sleep(1)
-                                else: post_successful = True
+                            # 3. Check if summarized in the *current day's* thread (if already checked)
+                            if url_to_process in current_day_urls:
+                                print(f"    Skipping (found in current day's thread '{post_title}'): {url_to_process}")
+                                processed_urls_status[url_to_process] = "DUPLICATE_CURRENT_DAY"
                             else:
-                                print("      Failed to format summary for posting.")
-                                processed_urls_status[url_to_process] = "POST_FAILED_FORMATTING"
+                                print(f"      Posting summary to existing/found thread {temp_target_thread_id}...")
+                                formatted_chunks = format_summaries({url_to_process: [summary_text, channel_name]})
+                                if formatted_chunks:
+                                    for i, chunk in enumerate(formatted_chunks):
+                                        print(f"        Sending chunk {i+1}/{len(formatted_chunks)}...")
+                                        if not send_message_to_thread(temp_target_thread_id, chunk):
+                                            print(f"        Failed to send chunk {i+1}. Summary post failed.")
+                                            processed_urls_status[url_to_process] = "POST_FAILED_CHUNK"
+                                            break
+                                        time.sleep(1)
+                                    else: post_successful = True # Mark successful only if all chunks sent
+                                else:
+                                    print("      Failed to format summary for posting.")
+                                    processed_urls_status[url_to_process] = "POST_FAILED_FORMATTING"
 
-                        # Update status
+                        # Update status and current day URL set
                         if post_successful:
                             processed_urls_status[url_to_process] = "SUMMARIZED_POSTED"
+                            current_day_urls.add(url_to_process) # Add successfully posted URL
                         elif url_to_process not in processed_urls_status:
                             processed_urls_status[url_to_process] = "POST_FAILED_UNKNOWN"
 
@@ -559,8 +600,8 @@ def main():
                         processed_urls_status[url_to_process] = "FAILED_EMPTY_SUMMARY"
                 else: # Summary generation failed (None)
                     if url_to_process not in processed_urls_status: # Don't overwrite specific failure codes
-                         print(f"    Failed to generate summary.")
-                         processed_urls_status[url_to_process] = "FAILED_SUMMARY"
+                        print(f"    Failed to generate summary.")
+                        processed_urls_status[url_to_process] = "FAILED_SUMMARY"
 
                 time.sleep(1) # Delay between processing URLs
 
